@@ -5,6 +5,8 @@
  * Author: Claudio Lanconelli <lanconelli.claudio@eptar.com>
  * based on enc28j60.c written by David Anders for 2.4 kernel version
  *
+ * 27/04/2016 - Updated by Marcel Hecko <maco@blava.net>
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -28,11 +30,14 @@
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/spi/spi.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_net.h>
 
 #include "enc28j60_hw.h"
 
 #define DRV_NAME	"enc28j60"
-#define DRV_VERSION	"1.01"
+#define DRV_VERSION	"1.02"
 
 #define SPI_OPLEN	1
 
@@ -47,6 +52,10 @@
 
 /* Max TX retries in case of collision as suggested by errata datasheet */
 #define MAX_TX_RETRYCOUNT	16
+
+#define MAC_ADDR_LEN (6)
+
+static char *macaddr = ":";
 
 enum {
 	RXFILTER_NORMAL,
@@ -480,6 +489,83 @@ static int enc28j60_phy_write(struct enc28j60_net *priv, u8 address, u16 data)
 	mutex_unlock(&priv->lock);
 
 	return ret;
+}
+
+/* Check the macaddr module parameter for a MAC address */
+static int enc28j60_is_macaddr_param(struct net_device *ndev)
+{
+       int i, j, got_num, num;
+       u8 mtbl[MAC_ADDR_LEN];
+
+       if (macaddr[0] == ':')
+                return 0;
+
+       i = 0;
+       j = 0;
+       num = 0;
+       got_num = 0;
+       while (j < MAC_ADDR_LEN) {
+                if (macaddr[i] && macaddr[i] != ':') {
+                        got_num++;
+                        if ('0' <= macaddr[i] && macaddr[i] <= '9')
+                                num = num * 16 + macaddr[i] - '0';
+                        else if ('A' <= macaddr[i] && macaddr[i] <= 'F')
+                                num = num * 16 + 10 + macaddr[i] - 'A';
+                        else if ('a' <= macaddr[i] && macaddr[i] <= 'f')
+                                num = num * 16 + 10 + macaddr[i] - 'a';
+                        else
+                                break;
+                        i++;
+                } else if (got_num == 2) {
+                        mtbl[j++] = (u8) num;
+                        num = 0;
+                        got_num = 0;
+                        i++;
+                } else {
+                        break;
+                }
+       }
+
+       if (j == MAC_ADDR_LEN) {
+                printk(KERN_DEBUG DRV_NAME " Setting MAC address to: "
+                "%02x:%02x:%02x:%02x:%02x:%02x\n", mtbl[0], mtbl[1], mtbl[2],
+                                                   mtbl[3], mtbl[4], mtbl[5]);
+                for (i = 0; i < MAC_ADDR_LEN; i++)
+                        ndev->dev_addr[i] = mtbl[i];
+			ndev->addr_assign_type = NET_ADDR_PERM;
+                return 1;
+       } else {
+		printk(KERN_DEBUG DRV_NAME
+                ": Unable to set MAC address from module param (wrong format?)\n");
+                return 0;
+       }
+}
+
+/* Set MAC address from devicetree property,
+ * module parameter or fallback to a random MAC
+*/
+static int enc28j60_get_mac_address(struct net_device *net_dev, struct spi_device *spi)
+{
+	const char *mac;
+
+	mac = of_get_mac_address(spi->dev.of_node);
+	if (mac) {
+		printk(KERN_DEBUG DRV_NAME
+                                ": Got MAC address from device tree\n");
+		ether_addr_copy(net_dev->dev_addr, mac);
+		net_dev->addr_assign_type = NET_ADDR_PERM;
+                return 1;
+	}
+
+	if (enc28j60_is_macaddr_param(net_dev)) {
+		printk(KERN_DEBUG DRV_NAME
+                                ": Got MAC address as module param\n");
+		return 1;
+        }
+
+	printk(KERN_DEBUG DRV_NAME": Generating random MAC address\n");
+	eth_hw_addr_random(net_dev);
+	return 1;
 }
 
 /*
@@ -1575,7 +1661,7 @@ static int enc28j60_probe(struct spi_device *spi)
 		ret = -EIO;
 		goto error_irq;
 	}
-	eth_hw_addr_random(dev);
+	enc28j60_get_mac_address(dev, spi);
 	enc28j60_set_hw_macaddr(dev);
 
 	/* Board setup must set the relevant edge trigger type;
@@ -1666,4 +1752,6 @@ MODULE_AUTHOR("Claudio Lanconelli <lanconelli.claudio@eptar.com>");
 MODULE_LICENSE("GPL");
 module_param_named(debug, debug.msg_enable, int, 0);
 MODULE_PARM_DESC(debug, "Debug verbosity level (0=none, ..., ffff=all)");
+module_param(macaddr, charp, 0);
+MODULE_PARM_DESC(macaddr, "MAC address (format: xx:xx:xx:xx:xx:xx)");
 MODULE_ALIAS("spi:" DRV_NAME);
